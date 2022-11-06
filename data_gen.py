@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
 from vocab import EXPR_TOKENIZER
+import math
 
 def gen_equiv(num, partitions):
     if(partitions == 1):
@@ -49,18 +50,35 @@ def gen_dataset(num_samples, max_num, max_partitions=3):
 import torch
 from torch.utils import data
 from torch.nn import Transformer
-from vocab import PAD_IDX, BOS_IDX, EOS_IDX
+from vocab import PAD_IDX, CLS_IDX, EOS_IDX, MASK_IDX, BASE_IDX, NUM_IDX
 
 def batch_expr_to_tensor(expr):
-    batch_enc = EXPR_TOKENIZER.encode_batch(expr) #Tokenizes, adds padding to batch
-    batch_id = [e.ids for e in batch_enc]
-    batch_mask = [e.attention_mask for e in batch_enc] #Avoid processing padding w/ attention
-    return torch.LongTensor(batch_id), ~torch.BoolTensor(batch_mask)
+    batch_id, batch_mask = EXPR_TOKENIZER.encode_batch(expr) #Tokenizes, adds padding to batch
+    return torch.LongTensor(batch_id), torch.BoolTensor(batch_mask)
 
 # function to collate data samples into batch tensors
 def collate_strs(batch_strs):
     src_id, src_pad_mask = batch_expr_to_tensor(batch_strs) 
     return src_id, src_pad_mask
+
+def bert_collate_strs(batch_strs):
+    src_id, src_pad_mask = batch_expr_to_tensor(batch_strs) 
+    N, L = src_id.shape
+
+    valid_mask_tokens = (src_id != CLS_IDX) & (src_id != EOS_IDX) & (src_id != PAD_IDX)
+    valid_num = valid_mask_tokens.sum(dim=1).int()
+    mod_num = torch.ceil(valid_num*0.15).int()
+
+    masked_src_id = src_id.clone()
+    masked_token_mask = torch.zeros(src_id.shape, dtype=bool)
+    for i in range(src_id.shape[0]):
+        mod_token_idx = torch.arange(L)[valid_mask_tokens[i]][torch.randperm(valid_num[i])][:mod_num[i]] #Tokens that will be modified, in random order
+        random_mut = torch.randint(BASE_IDX, BASE_IDX+NUM_IDX, (mod_num[i],)) #Each IDX to change mut tokens to
+        random_mut[torch.rand(random_mut.shape) > 0.2] = MASK_IDX #Change 80% to mask token
+        masked_src_id[i, mod_token_idx] = random_mut 
+        masked_token_mask[i, mod_token_idx] = 1 #Record changed tokens in bool mask 
+
+    return masked_src_id, masked_token_mask, src_id, src_pad_mask
 
 class ExpressionDataset(data.Dataset):
     def __init__(self, expr_l):
@@ -73,6 +91,22 @@ class ExpressionDataset(data.Dataset):
 
     def __getitem__(self, index):
         return self.expr_l[index]
+
+    def __len__(self):
+        return len(self.expr_l)
+
+class ExpressionValidationDataset(data.Dataset):
+    def __init__(self, expr_l, expr_valid_l):
+        self.expr_l = expr_l
+        self.expr_valid_l = expr_valid_l
+    
+    @classmethod
+    def from_csv(cls, csv_fn='data/equation_validation_dataset.csv'):
+        df = pd.read_csv(csv_fn)
+        return ExpressionValidationDataset(list(df['Eq']), list(df['EqValid']))
+
+    def __getitem__(self, index):
+        return self.expr_l[index], self.expr_valid_l[index]
 
     def __len__(self):
         return len(self.expr_l)
